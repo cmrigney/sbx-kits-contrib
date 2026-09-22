@@ -47,8 +47,8 @@ commands:
         #!/bin/sh
         # --app-name puts the sandbox name in the browser tab title, so tabs for
         # concurrent sandboxes on one workspace are tellable apart. No braces
-        # around SANDBOX_VM_ID: only WORKDIR may be brace-interpolated here.
-        name=$SANDBOX_VM_ID
+        # around SANDBOX_NAME: only WORKDIR may be brace-interpolated here.
+        name=$SANDBOX_NAME
         [ -n "$name" ] || name=$(hostname)
         exec code-server --bind-addr 0.0.0.0:8080 --auth none \
           --app-name "$name" "${WORKDIR}"
