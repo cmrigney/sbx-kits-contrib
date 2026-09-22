@@ -380,9 +380,8 @@ func (c Credential) RoutingHosts() []string {
 
 // ApiKey describes an api-key-shaped credential. Inject is the fan-out
 // of which domains/headers the proxy injects the resolved value into;
-// Name is the env-var name the proxy populates inside the container
-// (set to the literal "proxy-managed" by the engine when this credential
-// is wired up).
+// Name is the env-var name, set to the literal "proxy-managed" sentinel
+// inside the container only when ProxyManaged is true.
 type ApiKey struct {
 	Name string `json:"name" yaml:"name"`
 	// ProxyManaged, when true, makes the engine set Name to the literal
@@ -460,8 +459,8 @@ type Caps struct {
 //   - exact:port:            api.example.com:443
 //   - single-label wildcard: *.example.com
 //
-// P3 entry formats (deferred): double wildcards (**.example.com), CIDR
-// (10.0.0.0/8), port ranges (api.example.com:8000-9000).
+// P3-labeled but enforced: double wildcards (**.example.com), port wildcard
+// (host:*). Still not enforced: CIDR (10.0.0.0/8), port ranges (host:8000-9000).
 type CapsNetwork struct {
 	Allow []string `json:"allow,omitempty" yaml:"allow,omitempty"`
 	Deny  []string `json:"deny,omitempty" yaml:"deny,omitempty"`
@@ -485,6 +484,49 @@ type Requires struct {
 	// Broader family matching (claude and its claude-* variants) is left to
 	// the consumer's extends-lineage check, not an explicit list.
 	Agent string `json:"agent,omitempty" yaml:"agent,omitempty"`
+}
+
+// KitArg declares one caller-supplied argument the kit accepts. A
+// `${{ kit.args.<name> }}` placeholder anywhere in spec.yaml or under files/
+// is replaced with the argument's value before the spec is decoded, which is
+// how an argument can parameterize any value in the grammar without the
+// schema knowing which one.
+//
+// Declaring arguments is what makes them discoverable: the block names the
+// kit's inputs, their meaning, and the values they accept, so a reader, a
+// `kit inspect`, and a registry UI all see the same contract. Because the
+// block lives in spec.yaml it is covered by the kit's signature — the
+// declaration and its defaults are signed, while a caller's substituted
+// values are not.
+//
+// Exactly one of Default or Required is declared: an argument either has a
+// fallback and is optional, or has none and must be supplied. The spec
+// library validates the declaration's well-formedness only; resolving a
+// value and rejecting one that fails Enum or Pattern lives in the consumer
+// that performs the substitution.
+type KitArg struct {
+	// Default is the value substituted when the caller supplies none. A nil
+	// default means the argument is required; an empty-string default is a
+	// real default and is honored as one.
+	Default *string `json:"default,omitempty" yaml:"default,omitempty"`
+
+	// Required marks an argument the caller must supply. It is the explicit
+	// spelling of "no default", and declaring it alongside Default is an
+	// error.
+	Required bool `json:"required,omitempty" yaml:"required,omitempty"`
+
+	// Description is the human-readable explanation shown wherever a kit's
+	// inputs are listed.
+	Description string `json:"description,omitempty" yaml:"description,omitempty"`
+
+	// Enum restricts the value to an exact set. Mutually exclusive with
+	// Pattern, which an exact set makes redundant.
+	Enum []string `json:"enum,omitempty" yaml:"enum,omitempty"`
+
+	// Pattern restricts the value to a Go (RE2) regexp matched against the
+	// whole value, not merely a substring of it. Mutually exclusive with
+	// Enum.
+	Pattern string `json:"pattern,omitempty" yaml:"pattern,omitempty"`
 }
 
 // EnvironmentPolicy defines environment variables to set in the container.
@@ -649,6 +691,13 @@ type Artifact struct {
 	// the merge. Declarative metadata with no runtime effect.
 	Licenses []string `json:"licenses,omitempty"`
 
+	// Args declares the caller-supplied arguments the kit accepts, keyed by
+	// argument name (see KitArg). A map rather than a list because the name
+	// is the key a `${{ kit.args.<name> }}` placeholder selects. The spec
+	// library validates the declarations; substitution happens in the
+	// consumer, before the spec is decoded.
+	Args map[string]KitArg `json:"args,omitempty"`
+
 	// PublishedPorts lists in-container ports the kit wants the runtime to
 	// publish on the host when the sandbox starts. It is a top-level
 	// canonical field in v2 — port publishing is inbound service exposure,
@@ -685,9 +734,8 @@ type Artifact struct {
 	// warning.
 	AgentContext string `json:"agentContext,omitempty"`
 
-	// Warnings is the list of non-fatal validation issues collected during
-	// load (typically v1 → v2 deprecation warnings). Empty slice when the
-	// spec uses only canonical v2 fields.
+	// Warnings lists non-fatal issues from load and validation — v1 → v2
+	// deprecations plus validator findings (e.g. an uncovered credential domain).
 	Warnings []string `json:"warnings,omitempty"`
 }
 
@@ -709,7 +757,7 @@ type OAuthPolicy struct {
 // minus Service (the service identifier comes from the parent Credential),
 // and with Passthrough replacing PassthroughResponse (renamed; same
 // semantics — Passthrough = true opts out of sentinel masking, a security
-// downgrade flagged with a warning at load time).
+// downgrade).
 //
 // A `passthroughReason: ...` field is deliberately NOT included in this
 // release. Whether passthrough should require a documented justification is

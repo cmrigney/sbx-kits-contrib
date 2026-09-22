@@ -34,6 +34,8 @@ permissions:
     allow:
       - api.anthropic.com
       - api.openai.com:443
+      - api.github.com
+      - github.com
       - "*.example.com"
     deny:
       - telemetry.example.com
@@ -56,8 +58,9 @@ credentials:
     apiKey:
       name: GITHUB_TOKEN
       inject:
+        # scheme: bearer is the whole Authorization header — no header: here,
+        # so the sugar is what fills it in.
         - domain: api.github.com
-          header: Authorization
           scheme: bearer
         - domain: github.com
           header: Authorization

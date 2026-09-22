@@ -68,7 +68,7 @@ a load-time warning where noted:
 | `sandbox.build` | Accepted; the runtime does **not** build images this release. A kit using `build:` **MUST** also set `sandbox.image`. |
 | `mixins:` | Accepted; mixin composition is **not** applied by the runtime this release. |
 | `sandbox.resources` | Accepted; enforcement is best-effort / pending. |
-| `permissions.network` extended patterns | `**.` wildcards, CIDR, and port ranges are declared but **not** enforced this release (see [§5.2](#52-permissionsnetwork)). |
+| `permissions.network` extended patterns | CIDR and port ranges are declared but **not** enforced this release; `**.` wildcards and `:*` port wildcards are enforced (see [§5.2](#52-permissionsnetwork)). |
 
 ---
 
@@ -104,10 +104,81 @@ security:                   # optional. Container security settings.
 | `licenses` | list<string> | optional. Each non-empty; no duplicates. SHOULD be valid SPDX identifiers. |
 | `locked` | list<string> | optional. Each a well-formed dotted path (`^[a-z][a-zA-Z0-9]*(\.[a-z][a-zA-Z0-9]*)*$`); no duplicates. Enforcement of the lock lives in the merge consumer. |
 | `security.privileged` | bool | optional. Runs the container privileged. Immutable at runtime (see [§6](#6-validation-summary)). |
+| `args` | map | optional. The arguments an installer may supply. See [§2.1](#21-args). |
 
 Both kinds also MAY set the shared behavior blocks — `agentInstructions`,
 `permissions`, `ports`, `credentials`, `environment`, `setup`,
 `volumes`, and a `files/` tree — defined in [§5](#5-shared-block-reference).
+
+### 2.1 `args`
+
+A kit MAY declare **arguments** — named values whoever installs the kit
+supplies — and reference them anywhere in `spec.yaml` or under `files/` as
+`${{ kit.args.<name> }}`. Substitution happens *before* the spec is decoded, so
+an argument can parameterize any value in the grammar.
+
+```yaml
+args:
+  version:
+    default: "latest"                       # optional: used when the installer supplies nothing
+    description: "Tool version to install"
+    pattern: '^(latest|[0-9]+\.[0-9]+\.[0-9]+)$'
+  channel:
+    default: "stable"
+    enum: ["stable", "beta", "nightly"]
+  token:
+    required: true                          # the installer MUST supply a value
+    description: "API token"
+
+environment:
+  variables:
+    VERSION: "${{ kit.args.version }}"
+    TOKEN: "${{ kit.args.token }}"
+```
+
+| Field | Type | Rules |
+|---|---|---|
+| *the key* | string | The argument name. MUST match `^[A-Za-z_][A-Za-z0-9_-]*$`. A dot is excluded so a name can never be confused with the dotted reference that selects it. |
+| `default` | string | The value used when the installer supplies none. Exactly one of `default` or `required` MUST be declared. `default: ""` is a real default, not an absent one. |
+| `required` | bool | `true` means the installer MUST supply a value. Mutually exclusive with `default` — an argument with a default is never required. |
+| `description` | string | optional. Human-readable help, shown wherever a kit's inputs are listed. |
+| `enum` | list<string> | optional. The exact set of accepted values; no duplicates. Mutually exclusive with `pattern`. |
+| `pattern` | string | optional. A Go (RE2) regexp matched against the **whole** value, not merely part of it. Mutually exclusive with `enum`. |
+
+- **Values are strings.** There is no `type` keyword: a substituted value's YAML
+  type is decided the ordinary way, by whether the author quoted the
+  placeholder. Quote it in a string-valued field —
+  `VERSION: "${{ kit.args.version }}"` — or a value like `1.20` is read as a
+  float and fails to decode into a string.
+- **Every reference MUST be declared.** A `${{ kit.args.x }}` with no `args.x`
+  declaration is an error. That is what makes the block a complete, trustworthy
+  list of a kit's inputs.
+- **A reference stands in for a value.** A mapping key that names an argument
+  is an error, escaped or not: nothing rewrites a key, so nothing there is
+  escapable.
+- **Escaping.** Write `$${{`, before any namespace, to emit a literal `${{`
+  and start no reference.
+- **Text that opens the namespace MUST parse.** An unescaped `${{ kit.args.`
+  that does not continue into a well-formed name and a closing `}}` is an
+  error, not text that survives into the value. A `${{ … }}` opening any other
+  namespace is otherwise left as written.
+- **The `args` block is never substituted.** Everything under it — defaults,
+  descriptions, enums, patterns — is the declaration of the kit's inputs, not
+  a use of them, so it reads exactly as written and a name mentioned only
+  there is no reference at all.
+- **A substituted value is spliced literally** and never re-read, so a value
+  that is itself shaped like a reference stays that text.
+- **Declarations are signed; values are not.** The block lives in `spec.yaml`,
+  so a signature covers the argument names, defaults, and constraints. The
+  values an installer supplies sit outside it.
+- **v2 only.** The frozen v1 grammar has no `args` block.
+- Not to be confused with [`sandbox.build.args`](#32-the-sandbox-block), which
+  are Docker build arguments passed to a Dockerfile build.
+
+Validating a declaration is the spec library's job. Resolving a value, and
+rejecting one that fails `enum` or `pattern`, belongs to the consumer that
+performs the substitution — which necessarily runs before the spec can be
+decoded.
 
 ---
 
@@ -121,6 +192,7 @@ A sandbox kit is a complete agent. It **MUST** declare a `sandbox:` block and
 | Field | Required | Notes |
 |---|---|---|
 | all [common fields](#2-common-top-level-fields) | `schemaVersion`, `kind`, `name` required | `kind` MUST be `sandbox`. |
+| [`args`](#21-args) | optional | Arguments the installer may supply. |
 | [`sandbox`](#32-the-sandbox-block) | **REQUIRED** | Container image + launch configuration. |
 | [`extends`](#34-extends-single-parent-inheritance) | optional | Single parent to inherit from. Sandbox-only. |
 | [`mixins`](#35-mixins-author-time-composition) | optional | Author-declared mixins. Sandbox-only. Forward-compat. |
@@ -328,6 +400,7 @@ sandbox can carry, a mixin can carry.
 | Field | Allowed | Notes |
 |---|---|---|
 | all [common fields](#2-common-top-level-fields) | yes | `kind` MUST be `mixin`. |
+| [`args`](#21-args) | yes | Arguments the installer may supply. |
 | `sandbox` | **FORBIDDEN** | Declaring it is a hard error. |
 | `extends` | **FORBIDDEN** | Mixins cannot inherit. |
 | `mixins` | **FORBIDDEN** | Mixins cannot compose other mixins. |
@@ -476,12 +549,12 @@ Entry formats:
 
 | Pattern | Example | Status |
 |---|---|---|
-| exact host | `api.example.com` (default port 443) | **Enforced** |
+| exact host | `api.example.com` (no port — matches any port) | **Enforced** |
 | exact host + port | `api.example.com:8080` | **Enforced** |
 | single-label wildcard | `*.example.com` (exactly one label; not `example.com`, not `a.b.example.com`) | **Enforced** |
-| multi-label wildcard | `**.example.com` | Declared; **not enforced** this release |
-| port range | `api.example.com:80-443` | Declared; **not enforced** this release |
-| port wildcard | `api.example.com:*` | Declared; **not enforced** this release |
+| multi-label wildcard | `**.example.com` | **Enforced** — matches one or more labels |
+| port range | `api.example.com:80-443` | Declared; **not enforced** this release — never matches a request |
+| port wildcard | `api.example.com:*` | **Enforced** — identical to omitting the port |
 | CIDR | `10.0.0.0/8` | Declared; **not enforced** this release |
 
 Rules:
@@ -490,8 +563,7 @@ Rules:
   Overlap between the lists is **legal** (a parent may allow `*.example.com`
   while a child denies `telemetry.example.com`).
 - **All-egress-declared.** Every domain a credential injects into
-  (`credentials[].apiKey.inject[].domain`) and every SSH host
-  (`credentials[].sshAgent.hosts[]`) **MUST** appear in
+  (`credentials[].apiKey.inject[].domain`) **MUST** appear in
   `permissions.network.allow`. The engine does not auto-derive egress.
 - Composition: `allow` and `deny` lists append across kits.
 
@@ -528,7 +600,6 @@ never declare discovery.
 | `provider` | optional | Forward-compat stub for the provider registry; warns and has no effect. |
 | `apiKey` | conditional | api-key shape ([§5.4.1](#541-apikey)). |
 | `oauth` | conditional | OAuth shape ([§5.4.2](#542-oauth)). |
-| `sshAgent` | conditional | SSH-agent forwarding ([§5.4.3](#543-sshagent)). |
 
 An entry MAY declare both `apiKey` and `oauth`; at runtime the API key wins when
 present, with OAuth as the fallback.
@@ -551,13 +622,20 @@ credentials:
 
 | Field | Type | Rules |
 |---|---|---|
-| `name` | string | REQUIRED. Env-var name. The engine sets it to the literal `proxy-managed` sentinel in-container when the credential is wired. |
+| `name` | string | Env-var name — MUST be a valid shell identifier when set, on both v1 and v2 specs. The engine sets it to the literal `proxy-managed` sentinel in-container only when `proxyManaged: true` is also set (see below); `name` alone declares the variable but populates nothing in-container. An empty name on a `schemaVersion "2"` spec is warned, not rejected: it means the credential is handled entirely proxy-side, with no in-container environment variable. |
 | `proxyManaged` | bool | When `true`, the sentinel is set in-container (re-expresses the removed v1 `environment.proxyManaged`). |
 | `inject[].domain` | string | REQUIRED. MUST appear in `permissions.network.allow`. |
 | `inject[].header` | string | The HTTP header to set. |
 | `inject[].format` | string | Header value format; MUST contain exactly one `%s`. Mutually exclusive with `scheme`. |
-| `inject[].username` | string | HTTP Basic username (proxy uses it as the username, the credential as the password). |
+| `inject[].username` | string | HTTP Basic username (proxy uses it as the username, the credential as the password). MUST NOT contain `:` — HTTP Basic (RFC 7617) treats the first colon as the user/password delimiter. |
 | `inject[].scheme` | string | Decode-time sugar (see below). Mutually exclusive with `format`. Always empty on the normalized artifact. |
+
+An inject entry SHOULD set at least one of `header` or `username`; one with
+neither injects nothing into requests and only maps the domain to the
+credential's service for routing/policy purposes — a legitimate shape, but
+`ValidateArtifact` warns since it usually signals a forgotten header or
+username. A `header`-bearing entry with no `username` MUST also set `format` —
+without one there is no template to substitute the credential into.
 
 **`scheme` sugar:**
 
@@ -565,6 +643,11 @@ credentials:
 |---|---|---|
 | `bearer` | `header: Authorization`, `format: "Bearer %s"` | `username` MUST NOT be set. |
 | `basic` | HTTP Basic Auth (username-driven at the proxy) | `username` is REQUIRED. |
+
+`bearer` fills in `header` only when the author left it empty, so an explicit
+`header:` still wins (Bearer-formatted value, non-standard header). `basic` is
+username-driven at the proxy rather than a header encoding, so it sets no
+`header` — write one explicitly if the service needs a specific one.
 
 #### 5.4.2 `oauth`
 
@@ -591,7 +674,7 @@ credentials:
         refreshToken: "refresh_token"
         expiresIn: "expires_in"
         scope: "scope"
-      skipIfEnv: []                      # optional — skip OAuth when these env vars are present
+      skipIfEnv: []                      # accepted at decode time; no effect for v2 kits (see below)
       passthrough: false                 # optional — opt out of sentinel masking (security downgrade)
 ```
 
@@ -600,25 +683,21 @@ credentials:
   placeholders. The engine encodes the map as JSON, then substitutes — output is
   guaranteed well-formed. The free-form `credentialFile.template` (Go
   `text/template`) is **deprecated**; when both are set, `structure` wins.
+- `skipIfEnv` is a v1-era field. The v2 decoder accepts it so migrated specs
+  load unchanged, but the binding-driven credential resolution that
+  `schemaVersion: "2"` selects (see §1.3) never consults it: a host env var
+  must not override the user's binding. For conditional behavior, declare both
+  `apiKey` and `oauth`; the API key wins when present.
 - `passthrough: true` returns the real token to the container instead of a
-  sentinel — a security downgrade, flagged with a warning at load.
+  sentinel. This is a security downgrade: the container sees the real token.
 
-#### 5.4.3 `sshAgent`
+#### 5.4.3 Reserved
 
-For services that authenticate over SSH. Keys stay on the host.
-
-```yaml
-credentials:
-  - service: github-ssh
-    sshAgent:
-      hosts:                             # REQUIRED — host:port SSH destinations
-        - github.com:22
-        - github.com:443
-      identities:                        # optional — restrict to key fingerprints
-        - "SHA256:abc123..."
-```
-
-Every `hosts` entry MUST also appear in `permissions.network.allow`.
+An earlier draft of this section described an `sshAgent` credential mechanism.
+No such field exists in the schema: `Credential` carries only the members
+listed in [§5.4](#54-credentials), and strict decoding ([§1.2](#12-strict-decoding))
+rejects a spec that declares `sshAgent:`. The section number is reserved for a
+future revision.
 
 ### 5.5 `environment`
 
@@ -635,7 +714,9 @@ now implicit on `credentials[].apiKey` (`proxyManaged: true`). Composition:
 > **Reserved prefixes (runtime constraint).** The `sbx` runtime reserves env
 > vars beginning with `DASH_`, `SBX_`, and `DOCKER_`, and may override `HOME`,
 > `USER`, `SHELL`, `PATH`, `LD_PRELOAD`, and `LD_LIBRARY_PATH`. Kits SHOULD NOT
-> set these. (Enforced by the engine, not by `ValidateArtifact`.)
+> set these. (Enforced by the engine, not by `ValidateArtifact`.) The
+> variables the runtime itself sets, which kit content MAY read, are listed in
+> [§9.5](#95-environment-injected-by-the-runtime).
 
 ### 5.6 `setup`
 
@@ -665,14 +746,19 @@ setup:
 |---|---|---|
 | `install[].command` | **string** (REQUIRED) | `sh -c <string>`; shell metacharacters work. A list is an error. |
 | `startup[].command` | **list<string>** (REQUIRED, non-empty) | Exec-style argv, no shell processing. For a shell, use `["sh", "-c", "<cmd>"]`. |
-| `files[]` | file write | `path` absolute; `mode` octal; only `${WORKDIR}` placeholder allowed in `content`. |
+| `files[]` | file write | Shell exec as uid `1000` (agent); `path` absolute; `mode` octal; only `${WORKDIR}` placeholder allowed in `content`. |
 
 - `install` runs **once** at sandbox creation, for every kit (built-in or
   user-supplied). Guard with `command -v <binary>` or use `files` with
   `onlyIfMissing: true` to stay idempotent.
 - `startup` runs on **every** container start (create, stop/start, daemon
   restart, host reboot). Author idempotent.
+- `files` paths MUST be writable by uid `1000`. A kit that needs to write to
+  a root-owned path such as `/etc` MUST use an `install` command instead and
+  set ownership appropriately if the agent needs to modify the file later.
 - Composition: all three lists concatenate in `--kit` order.
+- The environment these scripts run in (user model, write surface, tool
+  floor, injected variables) is specified in [§9](#9-runtime-environment).
 
 ### 5.7 `volumes`
 
@@ -739,17 +825,56 @@ the per-field rules above:
   byte-size; `mode` octal.
 - **ports**: `container` in 1..65535; `protocol` in `{"", tcp, udp}` (validation error messages spell this `publishedPorts[...]`, the canonical field name).
 - **environment**: variable keys are valid shell identifiers.
+- **credentials**: `service` non-empty on every entry. Its lowercase-kebab
+  charset ([§5.4](#54-credentials)) is **not** enforced here — the v1 fold
+  derives service keys from env-var names and keeps underscores
+  (`SAMPLE_PROXY_TOKEN` → `sample_proxy`), so enforcing it would reject v1
+  kits that load today.
+- **credentials[].apiKey** (when present): whenever `name` is non-empty (v1 or
+  v2) it MUST be a valid shell identifier; each `inject[].domain` non-empty;
+  `inject[].format`, when set, contains exactly one `%s`; a `header`-bearing
+  entry with no `username` also requires `format` (otherwise there is no
+  template to substitute the credential into); `username`, when set, does not
+  contain `:` (HTTP Basic's user/password delimiter). Separately,
+  `ValidateArtifact` emits non-fatal warnings — it does not reject the kit —
+  for three legitimate-but-worth-a-second-look shapes: an inject domain absent
+  from `permissions.network.allow`; an inject entry with neither `header` nor
+  `username` set, which injects nothing into requests and only maps the domain
+  to the credential's service (the v1 `network.serviceDomains` +
+  `network.serviceAuth` fold can also produce a header-only inject with no
+  name — see below — and that shape has always been accepted); and, on a
+  `schemaVersion "2"` spec, an empty `name`, meaning the credential is handled
+  entirely proxy-side with no in-container environment variable. The engine
+  still performs the authoritative inject-domain-coverage enforcement at load
+  or sandbox-create time.
+- **credentials[].oauth** (when present): `tokenEndpoint.host` and
+  `tokenEndpoint.path` non-empty; `sentinels.accessToken` and
+  `sentinels.refreshToken` non-empty **unless** `passthrough: true`;
+  and when `credentialFile` is set, its `path` is non-empty and at least one
+  of `template` / `structure` is present. This mirrors the proxy's own
+  runtime guard, so a kit that validates here will not fail the interceptor
+  later. Placeholder *correctness* inside `structure` is checked by the
+  engine at render time, not here.
 - **setup**: `install[].command` non-empty; `startup[].command` non-empty;
   `files[].path` absolute; `files[].mode` octal; only `${WORKDIR}` placeholder
   in `files[].content`.
 - **locked**: each a well-formed dotted path; no duplicates.
 - **licenses**: each non-empty; no duplicates.
+- **args**: each name matches the argument-name pattern; exactly one of
+  `default` / `required` per argument; `enum` and `pattern` mutually exclusive;
+  `enum` free of duplicates; `pattern` a valid RE2 regexp; and a declared
+  `default` satisfies its own `enum` / `pattern`. Whether an *installer's*
+  value satisfies the constraint is checked by the consumer that substitutes
+  it ([§2.1](#21-args)).
 - **files/**: target `home` or `workspace`; relative, non-escaping paths.
 
 Rules stated as **MUST** in this document that are enforced by the engine rather
-than by `ValidateArtifact` (e.g. inject-domain ⊆ `permissions.network.allow`,
-reserved env prefixes, `sandbox.build` requiring `image`) surface at load or
-sandbox-create time.
+than by `ValidateArtifact` (e.g. reserved env prefixes, `sandbox.build`
+requiring `image`) surface at load or sandbox-create time. inject-domain ⊆
+`permissions.network.allow` is the partial exception: `ValidateArtifact` warns
+when it detects an uncovered domain, but the engine still performs the
+authoritative enforcement at load or sandbox-create time — the warning does
+not reject the kit.
 
 Validation **never** errors on legacy v1 fields — that is the normalize layer's
 job, and it only runs on the `schemaVersion: "1"` path.
@@ -784,3 +909,101 @@ legacy surface onto the canonical model this grammar targets and appends one
 path entirely. The complete per-surface mapping and the `migrate-v1-to-v2.go`
 script are documented in
 [v1 → v2 migration](../skills/kit-author/topics/v1-migration.md).
+
+---
+
+## 9. Runtime environment
+
+This section pins what kit content (install and startup scripts, `files/`
+payloads, entrypoints) MAY assume about the environment it runs in. Each
+statement is a constraint on runtimes that consume kits, in the same spirit as
+the reserved prefixes in [§5.5](#55-environment). `ValidateArtifact` checks
+none of it. A kit that assumes more than this section grants is not portable
+across conforming runtimes.
+
+### 9.1 User model
+
+Conforming runtimes provide:
+
+- a default user that is not root, named `agent`, uid `1000`, with home
+  directory `/home/agent` (the `files/home/` target of [§5.8](#58-files-directory));
+- passwordless `sudo` for that user;
+- the execution users of [§5.6](#56-setup): `setup.install` entries run as
+  root unless `user:` says otherwise, and `setup.startup` entries run as the
+  agent user unless `user:` says otherwise.
+
+### 9.2 Write surface
+
+- Install entries running as root MAY write to `/usr/local/bin`, `/opt`,
+  `/etc`, and `/tmp`.
+- `/home/agent` and the workspace belong to the agent user. A root install
+  step that writes there MUST restore ownership (enumerate the paths it
+  touched, for example `chown agent:agent /home/agent/.claude
+  /home/agent/.claude/settings.json`, rather than recursing over the
+  parent — `~/.claude` holds runtime-managed content that the kit does not
+  own, so a kit SHOULD NOT take ownership of the whole directory or couple
+  itself to whatever the runtime places there), or later writes by the
+  agent user fail.
+- Startup entries and the entrypoint run as the agent user by default and
+  MUST NOT assume root write access.
+
+### 9.3 Tool floor
+
+- Kit scripts MAY assume `sh` and `curl` exist in the image. `sh` is a hard
+  requirement: `setup.install` strings run via `sh -c` ([§5.6](#56-setup)).
+- `git`, `jq`, `node`, and `python3` are NOT part of the floor. A kit that
+  needs one MUST install it in `setup.install` or choose an image that ships
+  it.
+
+### 9.4 Architectures
+
+Kits are consumed on `amd64` and `arm64` hosts, and a kit SHOULD work on both.
+The recurring traps: download URLs that resolve per architecture, and apt
+mirrors that differ (`archive.ubuntu.com` and `security.ubuntu.com` carry
+amd64 packages, `ports.ubuntu.com` carries arm64), so egress allow lists name
+all three.
+
+### 9.5 Environment injected by the runtime
+
+The runtime injects environment variables into every container. The variable
+names below are contract; the values are owned by the runtime and opaque.
+Kit content reads the variables where it needs them and MUST NOT copy an
+observed value into a config file, script, or image: a value captured from one
+sandbox is wrong or meaningless in the next.
+
+- `SBX_CRED_<SERVICE>_MODE`: how the credential for `<SERVICE>` was resolved.
+  Values: `apikey`, `oauth`, or `none`. Injected before `setup.install` runs.
+  Read it defensively, treating unset as `none`:
+  `${SBX_CRED_MYSERVICE_MODE:-none}`.
+- The env var named by `credentials[].apiKey.name`: set to the sentinel value
+  only when `apiKey.proxyManaged: true` is also set ([§5.4.1](#541-apikey)); `name`
+  on its own declares the variable but populates nothing in-container. A
+  config file that needs the value references the variable (for example
+  `"${ANTHROPIC_API_KEY}"` in a format that expands env references) instead
+  of embedding the sentinel literal.
+- `MCP_GATEWAY_URL` and `MCP_SENTINEL_TOKEN_NAME`: the MCP gateway endpoint
+  and the name of its auth sentinel. Both are absent when no gateway is
+  enabled, so a registration script MUST first test
+  `[ -n "$MCP_GATEWAY_URL" ]` and write nothing when it is empty. The TCK
+  asserts this guard and rejects registration scripts that hardcode a URL or
+  a token ([tck/mcp.go](../tck/mcp.go)).
+- Proxy and CA variables: `HTTP_PROXY`, `HTTPS_PROXY`, `NO_PROXY` (and their
+  lowercase forms), `PROXY_CA_CERT_B64`, `NODE_EXTRA_CA_CERTS`,
+  `NODE_USE_ENV_PROXY`, `SSL_CERT_FILE`, `REQUESTS_CA_BUNDLE`, `PIP_CERT`,
+  `JAVA_TOOL_OPTIONS`. Kit scripts MAY read them and re-export them into tool
+  config (for example `npm config set proxy $HTTP_PROXY`) and MUST NOT
+  overwrite them.
+
+The reserved prefixes of [§5.5](#55-environment) stay authoritative: kits do
+not set variables under `DASH_`, `SBX_`, or `DOCKER_`. This section is about
+reading what the runtime sets.
+
+### 9.6 Lifecycle
+
+- `setup.install` runs once, before the sandbox's entrypoint first runs.
+- `setup.startup` MAY run on every sandbox start (create, stop and start,
+  daemon restart, host reboot). Entries MUST be idempotent ([§5.6](#56-setup)).
+- A long-running background process started by kit content MUST be started as
+  a process group leader (for example with `setsid`), with stdio redirected
+  away from the launching script, so it outlives its setup command and can be
+  signaled as a unit.
